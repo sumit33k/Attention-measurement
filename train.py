@@ -1,10 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Fri Jan 20 15:28:03 2017
-
-@author: sumit
-"""
-
 import numpy as np
 import tensorflow as tf
 
@@ -260,7 +253,7 @@ while 1:
     dict[items[0]] = value
 
 f.close()
-print "Build dict finished"
+print ("Build dict finished")
 
 def word2vec(sent):
     '''
@@ -323,7 +316,7 @@ while f1<1100:
     y[score_int] = 1
     train_y.append(np.array(y, dtype=np.float32))
 train_data.close()
-print "import train data finished"
+print ("import train data finished")
 
 test_data = open('./test.txt','r')
 test_sentence1 = []
@@ -347,7 +340,7 @@ while f2<110:
     y[score_int] = 1
     test_y.append(np.array(y, dtype=np.float32))
 test_data.close()
-print "import test data finished"
+print ("import test data finished")
 
 #------------------------------------------------------------------------
 
@@ -366,5 +359,5 @@ for i in range(1000):
             y_test = test_y[j]
             accarcy = sess.run([acc], feed_dict={xs1: x1_test, xs2: x2_test, ys:y_test})
             score.append(accarcy*1.0)
-        print i, np.mean(score)
+        print ( i, np.mean(score))
 
