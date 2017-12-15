@@ -1,363 +1,127 @@
-import numpy as np
+#!/usr/bin/python
+"""
+Toy example of attention layer use
+
+Train RNN (GRU) on IMDB dataset (binary classification)
+Learning and hyper-parameters were not tuned; script serves as an example 
+"""
+from __future__ import print_function, division
+
 import tensorflow as tf
+from tensorflow.contrib.rnn import GRUCell
+from tensorflow.python.ops.rnn import dynamic_rnn as rnn
+from tensorflow.python.ops.rnn import bidirectional_dynamic_rnn as bi_rnn
+from keras.datasets import imdb
 
+from attention import attention
+from utils import *
 
-Dim = 300*2
-numFilter = 20
-batch_size = 1
+NUM_WORDS = 10000
+INDEX_FROM = 3
+SEQUENCE_LENGTH = 250
+EMBEDDING_DIM = 100
+HIDDEN_SIZE = 150
+ATTENTION_SIZE = 50
+KEEP_PROB = 0.8
+BATCH_SIZE = 256
+NUM_EPOCHS = 3  # Model easily overfits without pre-trained words embeddings, that's why train for a few epochs
+DELTA = 0.5
 
-def filter(sent):
-    '''
-    if a character is ',' or '.', etc., it should be separated 
-    '''
-    s = ''
-    for i in sent:        
-        if not (i.isdigit() or i.isalpha()):
-            i = ' '+i+' '
-        s = s + i
-    return s
+# Load the dataset
+(X_train, y_train), (X_test, y_test) = imdb.load_data(num_words=NUM_WORDS, index_from=INDEX_FROM)
 
-def weight_variable(shape):
-    w = tf.truncated_normal(shape = shape, stddev = 0.1)
-    return tf.Variable(w)
+# Sequences preprocessing
+vocabulary_size = get_vocabulary_size(X_train)
+X_test = fit_in_vocabulary(X_test, vocabulary_size)
+X_train = zero_pad(X_train, SEQUENCE_LENGTH)
+X_test = zero_pad(X_test, SEQUENCE_LENGTH)
 
-def bias_variable(shape):
-    b = tf.constant(0.1, shape = shape)
-    return b
+# Different placeholders
+batch_ph = tf.placeholder(tf.int32, [None, SEQUENCE_LENGTH])
+target_ph = tf.placeholder(tf.float32, [None])
+seq_len_ph = tf.placeholder(tf.int32, [None])
+keep_prob_ph = tf.placeholder(tf.float32)
 
-def holistic_Filter(x, ws, W, b, pooling='max'):
-    '''
-    
-    '''
-    y = tf.nn.conv2d(x, W, strides = [1,1,1,1], padding="SAME")
-    #y = tf.reshape(tf.reduce_mean(y, axis=2), [batch_size, -1, 1, numFilter])
-    o = tf.nn.relu(y + b) #shape = [batch_size, len+1-ws, height=1, numFilter]
-    # pooling ---groupA--- 
-    if pooling == 'max':
-        o_pooling = tf.reduce_max(o, axis = 1) # shape = [batch_size, height=1, numFilter], the rank is reduced by 1. 
-    elif pooling =='min':
-        o_pooling = tf.reduce_min(o, axis = 1)
-    else:
-        o_pooling = tf.reduce_mean(o, axis = 1)
-    return o_pooling
+# Embedding layer
+embeddings_var = tf.Variable(tf.random_uniform([vocabulary_size, EMBEDDING_DIM], -1.0, 1.0), trainable=True)
+batch_embedded = tf.nn.embedding_lookup(embeddings_var, batch_ph)
 
-def per_dimension_Filter(x, ws, W, b, pooling='max'):
-    '''
-    
-    '''  
-    x_shape = x.get_shape()
-    n = x_shape[2]
-    x_unpack = tf.unpack(x, axis = 2)
-    W_unpack = tf.unpack(W, axis = 1)
-    b_unpack = tf.unpack(b, axis = 1)
-    y = []
-    for i in range(n):
-        xi = x_unpack[i]
-        wi = W_unpack[i]
-        bi = b_unpack[i]
-        conv_y = tf.nn.relu(tf.nn.conv1d(xi, wi, stride=1, padding="SAME") + bi) 
-        y.append(conv_y)
-    
-    o = tf.pack(y, axis = 2) # [batch=1, len+1-ws, height=Dim , numFilter]
-    # pooling --groupB---
-    if pooling == 'max':
-        o_pooling = tf.reduce_max(o, axis = 1) #[batch=1, height=Dim, numFilter]
-    else:
-        o_pooling = tf.reduce_max(o, axis = 1)
-    return o_pooling
+# (Bi-)RNN layer(-s)
+rnn_outputs, _ = bi_rnn(GRUCell(HIDDEN_SIZE), GRUCell(HIDDEN_SIZE),
+                        inputs=batch_embedded, sequence_length=seq_len_ph, dtype=tf.float32)
+# rnn_outputs, _ = rnn(GRUCell(hidden_size), inputs=batch_embedded, sequence_length=seq_len_ph, dtype=tf.float32)
 
+# Attention layer
+attention_output, alphas = attention(rnn_outputs, ATTENTION_SIZE, return_alphas=True)
 
+# Dropout
+drop = tf.nn.dropout(attention_output, keep_prob_ph)
 
+# Fully connected layer
+W = tf.Variable(tf.truncated_normal([HIDDEN_SIZE * 2, 1], stddev=0.1))  # Hidden size is multiplied by 2 for Bi-RNN
+b = tf.Variable(tf.constant(0., shape=[1]))
+y_hat = tf.nn.xw_plus_b(drop, W, b)
+y_hat = tf.squeeze(y_hat)
 
-def groupA_block(x, w, b, wss=[1, 2, 100], poolings = ['max', 'min', 'mean']):
-    y = []
-    for j in range(len(poolings)):    
-        pooling = poolings[j]
-        tmp_y = []
-        for i in range(len(wss)):
-            ws = wss[i]
-            o = holistic_Filter(x, ws, w[i], b[i], pooling)
-            tmp_y.append(o)
-            
-        y.append(tmp_y)
-    return y
-    
-def groupB_block(x, w, b, wss=[1, 2], poolings = ['max','min']):
-    y = []
-    for j in range(len(poolings)):
-        pooling = poolings[j]
-        tmp_y = []
-        for i in range(len(wss)):
-            ws = wss[i]
-            o = per_dimension_Filter(x, ws, w[i], b[i], pooling)
-            tmp_y.append(o)
-        y.append(tmp_y)
-    return y
+# Cross-entropy loss and optimizer initialization
+loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=y_hat, labels=target_ph))
+optimizer = tf.train.AdamOptimizer(learning_rate=1e-3).minimize(loss)
 
-def cosine_distance(a, b):
-	inner_product = tf.reduce_sum(tf.multiply(a, b), axis=1)
-	cos_angle = tf.divide(inner_product, tf.multiply(tf.sqrt(tf.reduce_sum(tf.square(a), axis=1)), tf.sqrt(tf.reduce_sum(tf.square(b), axis=1))))
-	return cos_angle
-                  
-def comU(a, b, tag = 2):
+# Accuracy metric
+accuracy = tf.reduce_mean(tf.cast(tf.equal(tf.round(tf.sigmoid(y_hat)), target_ph), tf.float32))
 
-    fea = []
-    fea.append(cosine_distance(a, b))
-    #fea.append(tf.sqrt(tf.reduce_sum(tf.square(tf.sub(a,b)), axis=1)))
-    fea.append(tf.sqrt(tf.reduce_sum(tf.square(tf.sub(a,b)), axis=1)))
-    if tag == 2:
-        fea.append(tf.reduce_max(tf.abs(tf.sub(a, b)), axis=1))
-    #print 'fea=', fea
-    return tf.pack(fea, axis=1)
+# Actual lengths of sequences
+seq_len_test = np.array([list(x).index(0) + 1 for x in X_test])
+seq_len_train = np.array([list(x).index(0) + 1 for x in X_train])
 
+# Batch generators
+train_batch_generator = batch_generator(X_train, y_train, BATCH_SIZE)
+test_batch_generator = batch_generator(X_test, y_test, BATCH_SIZE)
 
-def similarity_measurement_layer(BlockA1, BlockA2, BlockB1, BlockB2, ws1=3, ws2=2):
-    '''
-    similarity measurement
-    '''
-    #----- algorithm 1
-   
-    featureH = []
-    for i in range(3):
-        regM1 = tf.concat(1, BlockA1[i])
-        regM2 = tf.concat(1, BlockA2[i])
-        for k in range(numFilter):
-            featureH.append(comU(regM1[:,:,k], regM2[:,:,k], 1))
-            
+saver = tf.train.Saver()
 
-    #----- algorithm 2
-    featureA = []
-    featureB = []
-    for i in range(3):
-        for j in range(ws1):
-            for k in range(ws1):
-                featureA.append(comU(BlockA1[i][j][:,0,:], BlockA2[i][k][:,0,:]))
-             
-                    
-    for i in range(2):
-        for j in range(ws2):
-            for k in range(numFilter):
-                featureB.append(comU(BlockB1[i][j][:,:,k], BlockB2[i][j][:,:,k]))
-    return tf.concat(1, featureH+featureB)
+if __name__ == "__main__":
+    with tf.Session() as sess:
+        sess.run(tf.global_variables_initializer())
+        print("Start learning...")
+        for epoch in range(NUM_EPOCHS):
+            loss_train = 0
+            loss_test = 0
+            accuracy_train = 0
+            accuracy_test = 0
 
+            print("epoch: {}\t".format(epoch), end="")
 
-def linear_layer(x, w, b):
-    '''
-    linear layer
-    '''
-    return tf.matmul(x, w) + b
-    
-def activation_layer(x):
-    '''
-    activation layer
-    '''
-    return tf.nn.tanh(x)
+            # Training
+            num_batches = X_train.shape[0] // BATCH_SIZE
+            for b in range(num_batches):
+                x_batch, y_batch = next(train_batch_generator)
+                seq_len = np.array([list(x).index(0) + 1 for x in x_batch])  # actual lengths of sequences
+                loss_tr, acc, _ = sess.run([loss, accuracy, optimizer],
+                                           feed_dict={batch_ph: x_batch,
+                                                      target_ph: y_batch,
+                                                      seq_len_ph: seq_len,
+                                                      keep_prob_ph: KEEP_PROB})
+                accuracy_train += acc
+                loss_train = loss_tr * DELTA + loss_train * (1 - DELTA)
+            accuracy_train /= num_batches
 
-def log_softmax_layer(x):
-    '''
-    log-softmax layer
-    '''
-    return tf.nn.softmax(x)
+            # Testing
+            num_batches = X_test.shape[0] // BATCH_SIZE
+            for b in range(num_batches):
+                x_batch, y_batch = next(test_batch_generator)
+                seq_len = np.array([list(x).index(0) + 1 for x in x_batch])  # actual lengths of sequences
+                loss_test_batch, acc = sess.run([loss, accuracy],
+                                                feed_dict={batch_ph: x_batch,
+                                                           target_ph: y_batch,
+                                                           seq_len_ph: seq_len,
+                                                           keep_prob_ph: 1.0})
+                accuracy_test += acc
+                loss_test += loss_test_batch
+            accuracy_test /= num_batches
+            loss_test /= num_batches
 
-
-
-## ---------------------------  build network ---------------------------------
-
-hindn = 150
-outputn = 6
-lr = 0.1
-
-xs1 = tf.placeholder(tf.float32, [None, Dim], name='input_sentenc')
-xs2 = tf.placeholder(tf.float32, [None, Dim], name='input_sentenc')
-
-
-ys = tf.placeholder(tf.float32, [outputn], name='input_score')
-xs1_4d = tf.reshape(xs1, [batch_size, -1, Dim, 1])
-xs2_4d = tf.reshape(xs2, [batch_size, -1, Dim, 1])
-ys_2d = tf.reshape(ys, [batch_size, outputn])
-
-# conv and pooling layer
-wsA = [1,2,100]
-wsB = [1,2]
-w1_conv = [weight_variable([wsA[0], Dim, 1, numFilter]),\
-           weight_variable([wsA[1], Dim, 1, numFilter]),\
-           weight_variable([wsA[2], Dim, 1, numFilter])]
-
-b1_conv = [bias_variable([numFilter]),\
-           bias_variable([numFilter]),\
-           bias_variable([numFilter])]
-
-#print 'w1_conv', w1_conv[0].get_shape()
-
-y1_A = groupA_block(xs1_4d, w1_conv, b1_conv, wsA)
-y2_A  = groupA_block(xs2_4d, w1_conv, b1_conv, wsA)
-
-
-w2_conv = [weight_variable([wsB[0], Dim, 1, numFilter]),
-           weight_variable([wsB[1], Dim, 1, numFilter])]
-b2_conv = [bias_variable([numFilter, Dim]),
-           bias_variable([numFilter, Dim])]
-y1_B = groupB_block(xs1_4d, w2_conv, b2_conv, wsB)
-y2_B = groupB_block(xs2_4d, w2_conv, b2_conv, wsB)
-#print 'y1_A', y1_A
-#print 'y1_B', y1_B
-#similarity_measurement_layer 
-feature = similarity_measurement_layer(y1_A, y2_A, y1_B, y2_B)
-#feature = tf.reduce_max(tf.concat(1, y1_B[0]+y1_B[1]+y2_B[0]+y2_B[1]), axis=2)
-
-
-
-# linear layer 1
-w1_linear = weight_variable([numFilter*2*3*2+numFilter*3*2, hindn]) 
-#w1_linear = weight_variable([81, hindn]) 
-b1_linear = bias_variable([hindn])
-y_linear1 = linear_layer(feature, w1_linear, b1_linear)
-
-# activstion layer
-y_activation = activation_layer(y_linear1)
-
-# linear layer 2
-w2_linear = weight_variable([hindn, outputn]) 
-b2_linear = bias_variable([outputn])
-y_linear2 = linear_layer(y_activation, w2_linear, b2_linear)
-
-# log-softmax layer
-y_softmax = log_softmax_layer(y_linear2)
-#print 'y_softmax', y_softmax.get_shape()
-#print 'ys', ys_2d.get_shape()
-
-
-cross_entropy = -tf.reduce_sum(ys_2d*tf.log(y_softmax))
-train = tf.train.GradientDescentOptimizer(lr).minimize(cross_entropy)
-
-acc = tf.reduce_mean(tf.cast(tf.equal(tf.argmax(ys_2d, 1), tf.argmax(y_softmax, 1)), tf.float32))
-#------------------------------------------------------------------------------
-init = tf.global_variables_initializer()
-sess = tf.Session()
-sess.run(init)
-
-
-#-------------------------- bulid dict of word-embaddings 
-f = open('./paragram-phrase-XXL.txt','r')
-dict = {}
-while 1:
-    line = f.readline()
-    if not line:
-        break
-    items = line.strip().split()
-    if len(items) != 301:
-        continue
-    value = []
-    for i in range(1,301):
-        value.append(float(items[i]))
-    dict[items[0]] = value
-
-f.close()
-print ("Build dict finished")
-
-def word2vec(sent):
-    '''
-    word to vector
-    '''
-    sent = sent.lower()
-    sent_vec = []
-    for i in range(len(sent)):
-        try:
-            tmp = dict[sent[i]]
-            sent_vec.append(tmp)
-        except:
-            pass
-    return sent_vec
-    
-'''attention-based word embadding '''
-def attention_based(sent1, sent2):
-    def softmax(x):
-    	return np.exp(x) / np.sum(np.exp(x), axis=0)
-
-    sent1_vec = np.array(sent1, dtype=np.float32)
-    sent2_vec = np.array(sent2, dtype=np.float32)    
-    D = np.dot(sent1_vec, np.transpose(sent2_vec))
-    for i in range(len(sent1_vec)):
-        for j in range(len(sent2_vec)):
-            D[i][j] = D[i][j]/(np.linalg.norm(sent1_vec[i])*np.linalg.norm(sent2_vec[j]))
-
-    E1 = np.sum(D, axis = 1)
-    E2 = np.sum(D, axis = 0)
-    A1 = softmax(E1)
-    A1 = A1.reshape([len(A1), 1])
-    A2 = softmax(E2)
-    A2 = A2.reshape([len(A2), 1])
-    sent1_attention = np.hstack((sent1_vec, np.multiply(sent1_vec, A1)))
-    sent2_attention = np.hstack((sent2_vec, np.multiply(sent2_vec, A2)))
-    return sent1_attention,sent2_attention
-
-# train data
-train_data = open('./train.txt','r')
-train_sentence1 = []
-train_sentence2 = []
-train_y = []
-f1 = 0
-while f1<1100:
-    f1 += 1
-    line = train_data.readline()
-    if not line:
-        #print line
-        break
-    items = line.strip().split('\t')
-    if len(items) != 3:
-        continue
-    vector1,vector2 = attention_based(word2vec(items[0]), word2vec(items[1]))
-    #train_sentence1.append(tf.Variable(vector1, tf.float32))
-    train_sentence1.append(vector1)
-    #train_sentence2.append(tf.Variable(vector2, tf.float32))
-    train_sentence2.append(vector2)
-    score_int = int(round(float(items[2])))
-    y = [0]*6
-    y[score_int] = 1
-    train_y.append(np.array(y, dtype=np.float32))
-train_data.close()
-print ("import train data finished")
-
-test_data = open('./test.txt','r')
-test_sentence1 = []
-test_sentence2 = []
-test_y = []
-f2=0
-while f2<110:
-    f2 += 1
-    line = test_data.readline()
-    if not line:
-        #print line
-        break
-    items = line.strip().split('\t')
-    if len(items) != 3:
-        continue
-    vector1, vector2 = attention_based(word2vec(items[0]), word2vec(items[1]))
-    test_sentence1.append(vector1)
-    test_sentence2.append(vector2)
-    score_int = int(round(float(items[2])))
-    y = [0]*6
-    y[score_int] = 1
-    test_y.append(np.array(y, dtype=np.float32))
-test_data.close()
-print ("import test data finished")
-
-#------------------------------------------------------------------------
-
-
-for i in range(1000):
-    x1 = train_sentence1[i]
-    x2 = train_sentence2[i]
-    y = train_y[i]
-    sess.run(train, feed_dict={xs1:x1, xs2:x2, ys:y})
-
-    if i%10 == 0:
-        score = []
-        for j in range(100):
-            x1_test = test_sentence1[j]
-            x2_test = test_sentence2[j]
-            y_test = test_y[j]
-            accarcy = sess.run([acc], feed_dict={xs1: x1_test, xs2: x2_test, ys:y_test})
-            score.append(accarcy*1.0)
-        print ( i, np.mean(score))
-
+            print("loss: {:.3f}, val_loss: {:.3f}, acc: {:.3f}, val_acc: {:.3f}".format(
+                loss_train, loss_test, accuracy_train, accuracy_test
+            ))
+        saver.save(sess, "model")
